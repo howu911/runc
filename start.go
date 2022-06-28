@@ -42,6 +42,7 @@ your host.`,
 				continue
 			}
 			switch status {
+			//如果容器在Created状态，那么就调用container.Exec()。而容器的状态由parent进程在最后会设置为Created状态
 			case libcontainer.Created:
 				if err := container.Exec(); err != nil {
 					fmt.Fprintf(os.Stderr, "start for %s failed: %v\n", id, err)

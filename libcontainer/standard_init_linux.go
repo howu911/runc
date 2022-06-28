@@ -44,6 +44,10 @@ func (l *linuxStandardInit) getSessionRingParams() (string, uint32, uint32) {
 // the kernel
 const PR_SET_NO_NEW_PRIVS = 0x26
 
+/*
+Init()方法会开始准备执行环境，并与parent进程进行交互。之后会主动关闭pipe结束交互。接着在syscall.Openat(exec.fifo)处阻塞。如果阻塞消除，则Init()往exec.fifo写”0” 。最后，神奇的事情发生了，在调用syscall.Exec()后，把用户的命令替换init命令，child进程完成了华丽丽的转变。容器启动完毕。
+所以，这里关键的是阻塞，阻塞的消除由runc start完成
+*/
 func (l *linuxStandardInit) Init() error {
 	if !l.config.Config.NoNewKeyring {
 		ringname, keepperms, newperms := l.getSessionRingParams()
@@ -156,13 +160,16 @@ func (l *linuxStandardInit) Init() error {
 		return err
 	}
 	// close the pipe to signal that we have completed our init.
+	//***关闭pipe，此时，parent process和该process的交互完成***//
 	l.pipe.Close()
 	// wait for the fifo to be opened on the other side before
 	// exec'ing the users process.
+	//***此步会阻塞，直到有进程open exec.fifo***//
 	fd, err := syscall.Openat(l.stateDirFD, execFifoFilename, os.O_WRONLY|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return newSystemErrorWithCause(err, "openat exec fifo")
 	}
+	//***往exec.fifo中写入0***//
 	if _, err := syscall.Write(fd, []byte("0")); err != nil {
 		return newSystemErrorWithCause(err, "write 0 exec fifo")
 	}

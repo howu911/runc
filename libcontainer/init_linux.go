@@ -66,11 +66,14 @@ type initer interface {
 	Init() error
 }
 
+// 当运行runc create时生成的是linuxStandardInit l?
 func newContainerInit(t initType, pipe *os.File, stateDirFD int) (initer, error) {
 	var config *initConfig
+	//***通过管道获取配置信息***//
 	if err := json.NewDecoder(pipe).Decode(&config); err != nil {
 		return nil, err
 	}
+	//***从配置信息中获取环境变量并设置为容器内环境变量***//
 	if err := populateProcessEnvironment(config.Env); err != nil {
 		return nil, err
 	}

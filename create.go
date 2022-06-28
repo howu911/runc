@@ -58,6 +58,7 @@ command(s) that get executed on start, edit the args parameter of the spec. See
 		if err != nil {
 			return err
 		}
+		// runc create主要调用了startContainer()函数
 		status, err := startContainer(context, spec, true)
 		if err != nil {
 			return err

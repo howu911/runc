@@ -228,8 +228,24 @@ func (p *initProcess) execSetns() error {
 	return nil
 }
 
+/*
+1 启动initProcess，即parent中的命令——runc init，也就是child进程；
+2 获取parentPipe；
+3 调用execSetns()等待进程namespace等信息完成，详见runc的下一篇分析；
+4 调用Apply()生成cgroup相关文件；
+5 调用createNetworkInterfaces()初始化容器网络；
+6 调用sendConfig()把配置发送给child进程，子进程在获取配置后才会往下执行；
+7 通过pipe和child进程进行交互：
+	7.1 当收到child进程的proReady信号，则调用Set()在cgroup中添加资源限制；
+	7.2 当收到procHooks时，则执行config.json定义的prestart hooks；
+	7.3 当child进程把pipe关闭时，则parent退出交互；
+8 返回，也就意味着runc create进程结束。
+此时child进程运行着/proc/self/exe init还在执行中。
+*/
 func (p *initProcess) start() error {
 	defer p.parentPipe.Close()
+	//***开始运行进程***//
+	//***&{/proc/self/exe [/proc/self/exe init] [_LIBCONTAINER_INITPIPE=3 _LIBCONTAINER_STATEDIR=4 _LIBCONTAINER_INITTYPE=standard] /home/fankang/mycontainer/rootfs 0xc420026008 0xc420026010 0xc420026018 [0xc420026118 0xc420026120] 0xc420088240 <nil> <nil> <nil> <nil> false [] [] [] [] <nil> <nil>}***//
 	err := p.cmd.Start()
 	p.process.ops = p
 	p.childPipe.Close()
@@ -238,15 +254,19 @@ func (p *initProcess) start() error {
 		p.process.ops = nil
 		return newSystemErrorWithCause(err, "starting init process command")
 	}
+	//***向parentPipe发送bootstrapData***//
+	//***nsexec.c会拿到bootstrapData***//
 	if _, err := io.Copy(p.parentPipe, p.bootstrapData); err != nil {
 		return err
 	}
+	//***等待进程namepace等信息设置完成***//
 	if err := p.execSetns(); err != nil {
 		return newSystemErrorWithCause(err, "running exec setns process for init")
 	}
 	// Save the standard descriptor names before the container process
 	// can potentially move them (e.g., via dup2()).  If we don't do this now,
 	// we won't know at checkpoint time which file descriptor to look up.
+	//***获取管道***//
 	fds, err := getPipeFds(p.pid())
 	if err != nil {
 		return newSystemErrorWithCausef(err, "getting pipe fds for pid %d", p.pid())
@@ -254,6 +274,8 @@ func (p *initProcess) start() error {
 	p.setExternalDescriptors(fds)
 	// Do this before syncing with child so that no children
 	// can escape the cgroup
+	//***把进程pid加入到cgroup中管理***//
+	//***调用的是/cgroup/systemd/apply_systemd.go***//
 	if err := p.manager.Apply(p.pid()); err != nil {
 		return newSystemErrorWithCause(err, "applying cgroup configuration for process")
 	}
@@ -263,9 +285,12 @@ func (p *initProcess) start() error {
 			p.manager.Destroy()
 		}
 	}()
+	//***初始化容器网络***//
 	if err := p.createNetworkInterfaces(); err != nil {
 		return newSystemErrorWithCause(err, "creating network interfaces")
 	}
+	//***通过管道发送配置文件给子进程***//
+	//***子进程获取config后，才能往下执行***//
 	if err := p.sendConfig(); err != nil {
 		return newSystemErrorWithCause(err, "sending config to init process")
 	}
@@ -279,6 +304,7 @@ func (p *initProcess) start() error {
 	dec := json.NewDecoder(p.parentPipe)
 loop:
 	for {
+		//***从parentPipe中获取json对象***//
 		if err := dec.Decode(&procSync); err != nil {
 			if err == io.EOF {
 				break loop
@@ -316,6 +342,7 @@ loop:
 				}
 			}
 			// Sync with child.
+			//***和子进程进行互动***//
 			if err := utils.WriteJSON(p.parentPipe, syncT{procRun}); err != nil {
 				return newSystemErrorWithCause(err, "writing syncT run type")
 			}

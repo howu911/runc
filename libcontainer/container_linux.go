@@ -191,6 +191,7 @@ func (c *linuxContainer) Start(process *Process) error {
 	if err != nil {
 		return err
 	}
+	// Start()主要调用了start()方法，其中如果容器的状态为Stopped，则start()的isInit为true，即Stopped状态的container需要重新init
 	return c.start(process, status == Stopped)
 }
 
@@ -210,6 +211,7 @@ func (c *linuxContainer) Run(process *Process) error {
 	return nil
 }
 
+//***Exec()调用exec()***//
 func (c *linuxContainer) Exec() error {
 	c.m.Lock()
 	defer c.m.Unlock()
@@ -217,12 +219,15 @@ func (c *linuxContainer) Exec() error {
 }
 
 func (c *linuxContainer) exec() error {
+	//***path:  /run/runc/nginx/exec.fifo***//
 	path := filepath.Join(c.root, execFifoFilename)
 	f, err := os.OpenFile(path, os.O_RDONLY, 0)
 	if err != nil {
 		return newSystemErrorWithCause(err, "open exec fifo for reading")
 	}
 	defer f.Close()
+	//***data:  0***//
+	//***只要把exec.fifo中的数据取出，则create()中的进程开始执行***//
 	data, err := ioutil.ReadAll(f)
 	if err != nil {
 		return err
@@ -234,11 +239,20 @@ func (c *linuxContainer) exec() error {
 	return fmt.Errorf("cannot start an already running container")
 }
 
+/*
+调用newParentProcess()生成parent。newParent会依据容器的状态生成initProcess或setnsProcess，runc create的parent为initProcess，newParentProcess()会把parent中的命令填充成/proc/self/exe init；
+调用parent.start()启动parent，即启动initProcess；
+设置container的状态为Created；
+调用config.json文件中定义的Hookb函数。
+*/
 func (c *linuxContainer) start(process *Process, isInit bool) error {
+	//***doInit为true时，parent为initProcess***//
+	//***doInit为false时，parent为setnsProcess***//
 	parent, err := c.newParentProcess(process, isInit)
 	if err != nil {
 		return newSystemErrorWithCause(err, "creating new parent process")
 	}
+	//***doInit为true时，调用initProcess的start()***//
 	if err := parent.start(); err != nil {
 		// terminate the process to ensure that it properly is reaped.
 		if err := parent.terminate(); err != nil {
@@ -261,6 +275,7 @@ func (c *linuxContainer) start(process *Process, isInit bool) error {
 		}
 		c.initProcessStartTime = state.InitProcessStartTime
 
+		//***调用config中定义的hook***//
 		if c.config.Hooks != nil {
 			s := configs.HookState{
 				Version:    c.config.Version,
@@ -311,7 +326,15 @@ func (c *linuxContainer) newParentProcess(p *Process, doInit bool) (parentProces
 	return c.newInitProcess(p, cmd, parentPipe, childPipe, rootDir)
 }
 
+/*
+init cmd的SysProcAttr并没有加入namespace，也就是说init进程没有自己的namespace。但明明容器起来后是有自己的namespace的， 本次分析就介绍runc创建namespace的主要流程
+*/
+//***构造init进程***//
+//***通过process中的信息构建cmd***//
 func (c *linuxContainer) commandTemplate(p *Process, childPipe, rootDir *os.File) (*exec.Cmd, error) {
+	//***Fankang***//
+	//***initArgs[0]:  /proc/self/exe***//
+	//***initArgs[1:]:  [init]***//
 	cmd := exec.Command(c.initArgs[0], c.initArgs[1:]...)
 	cmd.Stdin = p.Stdin
 	cmd.Stdout = p.Stdout
@@ -320,7 +343,10 @@ func (c *linuxContainer) commandTemplate(p *Process, childPipe, rootDir *os.File
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
+	//***Fankang***//
+	//***把childPipe放到cmd的ExtraFiles中***//
 	cmd.ExtraFiles = append(p.ExtraFiles, childPipe, rootDir)
+	//***在环境变量中加入_LIBCONTAINER_INITPIPE和_LIBCONTAINER_STATEDIR***//
 	cmd.Env = append(cmd.Env,
 		fmt.Sprintf("_LIBCONTAINER_INITPIPE=%d", stdioFdCount+len(cmd.ExtraFiles)-2),
 		fmt.Sprintf("_LIBCONTAINER_STATEDIR=%d", stdioFdCount+len(cmd.ExtraFiles)-1))
@@ -342,6 +368,7 @@ func (c *linuxContainer) newInitProcess(p *Process, cmd *exec.Cmd, parentPipe, c
 		}
 	}
 	_, sharePidns := nsMaps[configs.NEWPID]
+	//newInitProcess()调用bootstrapData()生成bootstrapData
 	data, err := c.bootstrapData(c.config.Namespaces.CloneFlags(), nsMaps, "")
 	if err != nil {
 		return nil, err
@@ -1281,6 +1308,7 @@ func encodeIDMapping(idMap []configs.IDMap) ([]byte, error) {
 // such as one that uses nsenter package to bootstrap the container's
 // init process correctly, i.e. with correct namespaces, uid/gid
 // mapping etc.
+// bootstrapData中存储有各namespace的信息
 func (c *linuxContainer) bootstrapData(cloneFlags uintptr, nsMaps map[configs.NamespaceType]string, consolePath string) (io.Reader, error) {
 	// create the netlink message
 	r := nl.NewNetlinkRequest(int(InitMsg), 0)

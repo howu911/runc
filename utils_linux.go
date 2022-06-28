@@ -179,10 +179,13 @@ func createContainer(context *cli.Context, id string, spec *specs.Spec) (libcont
 		return nil, err
 	}
 
+	//***生成LinuxFactory***//
 	factory, err := loadFactory(context)
 	if err != nil {
 		return nil, err
 	}
+	//***调用LinuxFactory的Create()方法***//
+	//factory是整个libcontainer的入口，而factory又有两个入口：Create()和StartInitialization()
 	return factory.Create(id, config)
 }
 
@@ -198,6 +201,7 @@ type runner struct {
 }
 
 func (r *runner) run(config *specs.Process) (int, error) {
+	//***生成process***//
 	process, err := newProcess(*config)
 	if err != nil {
 		r.destroy()
@@ -223,6 +227,8 @@ func (r *runner) run(config *specs.Process) (int, error) {
 		return -1, err
 	}
 	handler := newSignalHandler(tty, r.enableSubreaper)
+	//***如果是create，则startFn为r.container.Start***//
+	//***如果是run，则startFn为r.container.Run***//
 	startFn := r.container.Start
 	if !r.create {
 		startFn = r.container.Run
@@ -284,6 +290,7 @@ func startContainer(context *cli.Context, spec *specs.Spec, create bool) (int, e
 	if id == "" {
 		return -1, errEmptyID
 	}
+	//***调用createContainer()创建linuxContainer***//
 	container, err := createContainer(context, id, spec)
 	if err != nil {
 		return -1, err

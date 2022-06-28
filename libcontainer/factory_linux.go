@@ -131,13 +131,24 @@ type LinuxFactory struct {
 	NewCgroupsManager func(config *configs.Cgroup, paths map[string]string) cgroups.Manager
 }
 
+/*
+验证id；
+验证config；
+创建containerRoot目录，如/run/run/nginx；
+创建exec.fifo，exec.fifo是一个管道文件，只有写时会被阻塞，读写都在时才会正常运行；
+生成container，其中initArgs为/proc/self/exe init，/proc/self/exec即为程序本身——runc，然后设置为stop状态。
+*/
+//***在容器外面执行***//
+//***生成逻辑上的容器***//
 func (l *LinuxFactory) Create(id string, config *configs.Config) (Container, error) {
 	if l.Root == "" {
 		return nil, newGenericError(fmt.Errorf("invalid root"), ConfigInvalid)
 	}
+	//***验证id***//
 	if err := l.validateID(id); err != nil {
 		return nil, err
 	}
+	//***验证config***//
 	if err := l.Validator.Validate(config); err != nil {
 		return nil, newGenericError(err, ConfigInvalid)
 	}
@@ -149,18 +160,22 @@ func (l *LinuxFactory) Create(id string, config *configs.Config) (Container, err
 	if err != nil {
 		return nil, newGenericError(err, SystemError)
 	}
+	//***创建containerRoot目录***//
+	//***containerRoot:  /run/runc/nginx***//
 	containerRoot := filepath.Join(l.Root, id)
 	if _, err := os.Stat(containerRoot); err == nil {
 		return nil, newGenericError(fmt.Errorf("container with id exists: %v", id), IdInUse)
 	} else if !os.IsNotExist(err) {
 		return nil, newGenericError(err, SystemError)
 	}
+	//***设置containerRoot目录，权限为0700***//
 	if err := os.MkdirAll(containerRoot, 0711); err != nil {
 		return nil, newGenericError(err, SystemError)
 	}
 	if err := os.Chown(containerRoot, uid, gid); err != nil {
 		return nil, newGenericError(err, SystemError)
 	}
+	//***创建exec.fifo，即/run/runc/nginx/exec.fifo***//
 	fifoName := filepath.Join(containerRoot, execFifoFilename)
 	oldMask := syscall.Umask(0000)
 	if err := syscall.Mkfifo(fifoName, 0622); err != nil {
@@ -171,13 +186,15 @@ func (l *LinuxFactory) Create(id string, config *configs.Config) (Container, err
 	if err := os.Chown(fifoName, uid, gid); err != nil {
 		return nil, newGenericError(err, SystemError)
 	}
+	//***生成linuxContainer***//
+	//***c:  &{nginx /run/runc/nginx 0xc420082800 0xc420015c40 [/proc/self/exe init] <nil>  criu {0 0} 0 <nil> {0 0 <nil>}}***//
 	c := &linuxContainer{
 		id:            id,
 		root:          containerRoot,
 		config:        config,
 		initArgs:      l.InitArgs,
 		criuPath:      l.CriuPath,
-		cgroupManager: l.NewCgroupsManager(config.Cgroups, nil),
+		cgroupManager: l.NewCgroupsManager(config.Cgroups, nil), //***设置Cgroup***//
 	}
 	c.state = &stoppedState{c: c}
 	return c, nil
@@ -219,9 +236,16 @@ func (l *LinuxFactory) Type() string {
 	return "libcontainer"
 }
 
+//***容器内初始化函数,在容器内部执行的***//
+/*
+从环境变量中获取pipe(环境变量在newParentProcess()中设置)及init的类型；
+调用newContainerInit()生成init：linuxSetnsInit或initStandardInit；
+调用init的Init()方法。
+*/
 // StartInitialization loads a container by opening the pipe fd from the parent to read the configuration and state
 // This is a low level implementation detail of the reexec and should not be consumed externally
 func (l *LinuxFactory) StartInitialization() (err error) {
+	//***获取管道***//
 	var pipefd, rootfd int
 	for _, pair := range []struct {
 		k string
@@ -255,6 +279,7 @@ func (l *LinuxFactory) StartInitialization() (err error) {
 		// this defer function will never be called.
 		if _, ok := i.(*linuxStandardInit); ok {
 			//  Synchronisation only necessary for standard init.
+			//***把错误信息通知parent***//
 			if werr := utils.WriteJSON(pipe, syncT{procError}); werr != nil {
 				fmt.Fprintln(os.Stderr, err)
 				return
@@ -272,10 +297,12 @@ func (l *LinuxFactory) StartInitialization() (err error) {
 			err = fmt.Errorf("panic from initialization: %v, %v", e, string(debug.Stack()))
 		}
 	}()
+	//***newContainerInit()定义在init_linux.go中***//
 	i, err = newContainerInit(it, pipe, rootfd)
 	if err != nil {
 		return err
 	}
+	//***执行Init()***//
 	return i.Init()
 }
 
