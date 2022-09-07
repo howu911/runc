@@ -168,7 +168,7 @@ func (l *LinuxFactory) Create(id string, config *configs.Config) (Container, err
 	} else if !os.IsNotExist(err) {
 		return nil, newGenericError(err, SystemError)
 	}
-	//***设置containerRoot目录，权限为0700***//
+	//***设置containerRoot目录，权限为0711***//
 	if err := os.MkdirAll(containerRoot, 0711); err != nil {
 		return nil, newGenericError(err, SystemError)
 	}
